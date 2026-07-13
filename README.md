@@ -2,7 +2,7 @@
   <img src="media/icon.png" width="128" alt="Dokploy for Raycast" />
 </p>
 
-<h1 align="center">Dokploy for Raycast</h1>
+<h1 align="center">Dokploy Manager for Raycast</h1>
 
 <p align="center">
   Manage your <a href="https://dokploy.com">Dokploy</a> servers without leaving Raycast.
