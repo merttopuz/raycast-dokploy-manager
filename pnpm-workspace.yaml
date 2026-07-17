@@ -1,0 +1,4 @@
+allowBuilds:
+  # esbuild is what `ray build` bundles the extension with. Its install script links the
+  # platform-specific binary, so denying it leaves the JS wrapper with nothing to run.
+  esbuild: true
