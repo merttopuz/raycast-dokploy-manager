@@ -6,7 +6,9 @@ import { deployTemplate, listServers } from "./api/dokploy-api";
 import { toErrorMessage } from "./api/errors";
 import { AccountDropdown } from "./components/account-dropdown";
 import { NoAccounts } from "./components/no-accounts";
+import { bookmarkIcon, TemplateDetail } from "./components/template-detail";
 import { useAccounts } from "./hooks/use-accounts";
+import { useBookmarkedTemplates } from "./hooks/use-bookmarks";
 import { useProjects } from "./hooks/use-projects";
 import { useTemplates } from "./hooks/use-templates";
 import { normalizeTag, templateKeywords, templateLinks, templateLogoUrl } from "./lib/templates";
@@ -23,6 +25,7 @@ export default function DeployTemplate() {
     reloadAccounts,
   } = useAccounts();
   const { data: templates, isLoading: templatesLoading } = useTemplates(client);
+  const { bookmarked, isLoading: bookmarksLoading, toggle } = useBookmarkedTemplates(client);
 
   if (!accountsLoading && !hasAccounts) {
     return (
@@ -32,9 +35,15 @@ export default function DeployTemplate() {
     );
   }
 
+  // Bookmarks are matched against the catalogue rather than rendered from the stored ids: nothing
+  // removes a bookmark when a template leaves the registry, so an id can outlive the template it
+  // names. Intersecting means a stale one quietly does nothing instead of drawing an empty row.
+  const favourites = templates.filter((template) => bookmarked.has(template.id));
+  const rest = templates.filter((template) => !bookmarked.has(template.id));
+
   return (
     <List
-      isLoading={accountsLoading || templatesLoading}
+      isLoading={accountsLoading || templatesLoading || bookmarksLoading}
       searchBarPlaceholder="Search templates by name or tag…"
       // The detail pane earns its place here: descriptions are a paragraph long and there are
       // hundreds of these, so a subtitle would truncate every one of them.
@@ -49,9 +58,33 @@ export default function DeployTemplate() {
         description="This Dokploy instance returned no templates from its registry."
       />
 
-      {templates.map((template) => (
-        <TemplateItem key={template.id} client={client} template={template} />
-      ))}
+      {/* Sections rather than a sort, so the split survives filtering: Raycast searches within a
+          section, and a bookmarked match stays visibly a bookmark instead of merely being first. */}
+      {favourites.length > 0 && (
+        <List.Section title="Bookmarked">
+          {favourites.map((template) => (
+            <TemplateItem
+              key={template.id}
+              client={client}
+              template={template}
+              isBookmarked
+              onToggleBookmark={toggle}
+            />
+          ))}
+        </List.Section>
+      )}
+
+      <List.Section title={favourites.length > 0 ? "All Templates" : undefined}>
+        {rest.map((template) => (
+          <TemplateItem
+            key={template.id}
+            client={client}
+            template={template}
+            isBookmarked={false}
+            onToggleBookmark={toggle}
+          />
+        ))}
+      </List.Section>
     </List>
   );
 }
@@ -59,9 +92,11 @@ export default function DeployTemplate() {
 interface TemplateItemProps {
   client?: DokployClient;
   template: Template;
+  isBookmarked: boolean;
+  onToggleBookmark: (templateId: string, templateName: string) => void;
 }
 
-function TemplateItem({ client, template }: TemplateItemProps) {
+function TemplateItem({ client, template, isBookmarked, onToggleBookmark }: TemplateItemProps) {
   const logo = templateLogoUrl(template);
   const links = templateLinks(template);
 
@@ -102,6 +137,35 @@ function TemplateItem({ client, template }: TemplateItemProps) {
               title="Deploy Template"
               icon={Icon.Rocket}
               target={<DeployTemplateForm client={client} template={template} />}
+            />
+          )}
+          {/* What the template will actually create - the question you have before installing it,
+              and the one the catalogue's description never answers. */}
+          <Action.Push
+            title="Show Template Details"
+            icon={Icon.Eye}
+            shortcut={{ modifiers: ["cmd"], key: "d" }}
+            target={
+              <TemplateDetail
+                template={template}
+                primaryAction={
+                  client ? (
+                    <Action.Push
+                      title="Deploy Template"
+                      icon={Icon.Rocket}
+                      target={<DeployTemplateForm client={client} template={template} />}
+                    />
+                  ) : undefined
+                }
+              />
+            }
+          />
+          {client && (
+            <Action
+              title={isBookmarked ? "Remove Bookmark" : "Bookmark Template"}
+              icon={bookmarkIcon(isBookmarked)}
+              shortcut={{ modifiers: ["cmd"], key: "b" }}
+              onAction={() => onToggleBookmark(template.id, template.name)}
             />
           )}
           {links.map((link) => (

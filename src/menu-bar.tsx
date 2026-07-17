@@ -16,10 +16,13 @@ import { DokployAccount } from "./accounts/types";
 import { DokployClient } from "./api/client";
 import { runServiceAction } from "./api/dokploy-api";
 import { toErrorMessage } from "./api/errors";
+import { ServerHealthMenu } from "./components/server-health-menu";
 import { useAccounts } from "./hooks/use-accounts";
 import { useAllDeployments } from "./hooks/use-deployments";
 import { AccountProjects, useAllProjects } from "./hooks/use-projects";
+import { hasServerInfo, useAllServerHealth } from "./hooks/use-server-health";
 import { deploymentHeadline, firstLine, relativeTime } from "./lib/format";
+import { formatPercent } from "./lib/health";
 import {
   ACTION_LABELS,
   ACTION_PAST,
@@ -37,17 +40,35 @@ import { DeploymentsLaunchContext } from "./types/launch";
 interface Preferences {
   /** Whether the menu bar watches every connected instance or only the active one. */
   menuBarScope?: "all" | "active";
+  /** Percent of the root filesystem at which the disk starts being called a problem. */
+  diskThreshold?: string;
+}
+
+const DEFAULT_DISK_THRESHOLD = 90;
+
+/**
+ * Dokploy configures its own CPU and memory thresholds and those are reused, but it has none for
+ * disk - so this is the one number the extension has to ask for.
+ */
+function resolveDiskThreshold(raw?: string): number {
+  const parsed = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 100 ? parsed : DEFAULT_DISK_THRESHOLD;
 }
 
 const LIFECYCLE_ACTIONS: ServiceAction[] = ["deploy", "redeploy", "rebuild", "start", "stop", "reload"];
 
 /**
- * Service health across every connected Dokploy instance. The icon turns red the moment anything
- * anywhere is in `error`, which is the whole point - you find out without going looking.
+ * Service and server health across every connected Dokploy instance. The icon turns red the moment
+ * anything anywhere is in `error`, which is the whole point - you find out without going looking.
+ *
+ * The disk goes red on the same icon, and that is the half that pays for itself: a Dokploy server
+ * dies of a full disk more often than of anything else, and unlike a failed service it announces
+ * itself in advance. Catching it here is the difference between cleaning up and recovering.
  */
 export default function MenuBar() {
   const { accounts, activeAccount, isLoading: accountsLoading, hasAccounts } = useAccounts();
-  const { menuBarScope = "all" } = getPreferenceValues<Preferences>();
+  const { menuBarScope = "all", diskThreshold } = getPreferenceValues<Preferences>();
+  const diskLimit = resolveDiskThreshold(diskThreshold);
 
   // The active account is still an account; scoping to it just narrows the list of instances polled.
   const watched = useMemo(
@@ -61,6 +82,11 @@ export default function MenuBar() {
     isLoading: deploymentsLoading,
     revalidate: revalidateDeployments,
   } = useAllDeployments(watched);
+  const {
+    data: health,
+    isLoading: healthLoading,
+    revalidate: revalidateHealth,
+  } = useAllServerHealth(watched, diskLimit);
 
   // Clients are built here, in memory, and never handed to a hook that caches - they hold API keys.
   const clients = useMemo(
@@ -68,12 +94,13 @@ export default function MenuBar() {
     [watched],
   );
 
-  const isLoading = accountsLoading || projectsLoading || deploymentsLoading;
+  const isLoading = accountsLoading || projectsLoading || deploymentsLoading || healthLoading;
   const showAccountNames = watched.length > 1;
 
   function refresh() {
     revalidate();
     revalidateDeployments();
+    revalidateHealth();
   }
 
   const failing = accountProjects.flatMap((entry) =>
@@ -85,19 +112,29 @@ export default function MenuBar() {
   const building = accountProjects.some((entry) => servicesOf(entry).some((service) => service.status === "running"));
   const unreachable = accountProjects.filter((entry) => entry.error);
 
-  // Also surfaced as the command's subtitle in Raycast's root search.
-  useEffect(() => {
-    if (isLoading || !hasAccounts) return;
-    const summary =
-      failing.length > 0
-        ? `${failing.length} failing`
+  // The point of watching the disk at all: a server that fills up takes its services down, and the
+  // whole idea is to hear about it while everything is still green.
+  const diskPressure = health.filter((entry) => entry.health.isUnderPressure);
+  const knownServers = health.filter(hasServerInfo);
+
+  const summary =
+    failing.length > 0
+      ? `${failing.length} failing`
+      : diskPressure.length > 0
+        ? `Disk ${formatPercent(diskPressure[0].health.disk)}`
         : unreachable.length > 0
           ? `${unreachable.length} unreachable`
           : totalServices > 0
             ? `${totalServices} services healthy`
             : "No services";
+
+  // Also surfaced as the command's subtitle in Raycast's root search. Keyed on the finished string
+  // and not the counts behind it: a disk climbing from 91% to 97% moves none of those counts, and
+  // watching them would pin the subtitle to whatever it said the first time it went red.
+  useEffect(() => {
+    if (isLoading || !hasAccounts) return;
     updateCommandMetadata({ subtitle: summary });
-  }, [isLoading, hasAccounts, failing.length, unreachable.length, totalServices]);
+  }, [isLoading, hasAccounts, summary]);
 
   if (!isLoading && !hasAccounts) {
     return (
@@ -132,7 +169,7 @@ export default function MenuBar() {
     }
   }
 
-  const hasProblem = failing.length > 0 || unreachable.length > 0;
+  const hasProblem = failing.length > 0 || unreachable.length > 0 || diskPressure.length > 0;
 
   return (
     <MenuBarExtra
@@ -147,8 +184,19 @@ export default function MenuBar() {
         showAccountNames ? `Dokploy - ${watched.length} accounts` : `Dokploy - ${watched[0]?.label ?? "not connected"}`
       }
     >
-      {failing.length > 0 && (
+      {(failing.length > 0 || diskPressure.length > 0) && (
         <MenuBarExtra.Section title="Needs Attention">
+          {/* Above the failing services, deliberately: a full disk is usually the thing that is
+              about to cause the next one, and it is the only entry here you can act on early. */}
+          {diskPressure.map((entry) => (
+            <MenuBarExtra.Item
+              key={`disk:${entry.accountId}`}
+              icon={{ source: Icon.ExclamationMark, tintColor: Color.Red }}
+              title={`Disk ${formatPercent(entry.health.disk)} full`}
+              subtitle={showAccountNames ? entry.accountLabel : undefined}
+              tooltip="Open the menu's server entry to free space up."
+            />
+          ))}
           {failing.map(({ service, entry }) => (
             <MenuBarExtra.Item
               key={`${entry.accountId}:${service.kind}:${service.id}`}
@@ -157,6 +205,22 @@ export default function MenuBar() {
               // With several instances connected, "which server?" is the first thing you need.
               subtitle={showAccountNames ? `${entry.accountLabel} · ${service.projectName}` : service.projectName}
               onAction={() => openService(clients.get(entry.accountId), service)}
+            />
+          ))}
+        </MenuBarExtra.Section>
+      )}
+
+      {/* An account whose server said nothing renders nothing, so the header has to be gated on
+          the entries that survive that - not on there being accounts. */}
+      {knownServers.length > 0 && (
+        <MenuBarExtra.Section title="Server">
+          {knownServers.map((entry) => (
+            <ServerHealthMenu
+              key={entry.accountId}
+              entry={entry}
+              client={clients.get(entry.accountId)}
+              showAccountName={showAccountNames}
+              onDidChange={refresh}
             />
           ))}
         </MenuBarExtra.Section>

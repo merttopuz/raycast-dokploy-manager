@@ -39,6 +39,24 @@ export interface ServiceKindConfig {
   hasDeployments: boolean;
   /** Action name -> route suffix. `reload` additionally requires `appName` in the body. */
   routes: Partial<Record<ServiceAction, string>>;
+  /**
+   * The `backup.*` route that runs this kind's backups on demand.
+   *
+   * There is no generic one - Dokploy has a separate procedure per engine, and the names are not
+   * spelled consistently (`manualBackupMySql` against `manualBackupMariadb`), so they are written
+   * out here rather than derived from the namespace. Getting a letter wrong is a 404.
+   *
+   * Undefined for applications and Redis, which have no database backup at all: Redis is backed up
+   * by volume instead, and there is no `manualBackupRedis` to call.
+   */
+  manualBackupRoute?: string;
+  /**
+   * What this kind is called in `schedule.list`'s `scheduleType`.
+   *
+   * Undefined for the databases: the enum is application/compose/server/dokploy-server, so there is
+   * no way to attach a schedule to one, and offering the action would only ever show an empty list.
+   */
+  scheduleType?: "application" | "compose";
 }
 
 const DATABASE_ROUTES: Partial<Record<ServiceAction, string>> = {
@@ -63,6 +81,7 @@ export const SERVICE_KINDS: Record<ServiceKind, ServiceKindConfig> = {
     color: Color.Blue,
     isDatabase: false,
     hasDeployments: true,
+    scheduleType: "application",
     routes: {
       deploy: "deploy",
       redeploy: "redeploy",
@@ -84,6 +103,8 @@ export const SERVICE_KINDS: Record<ServiceKind, ServiceKindConfig> = {
     color: Color.Purple,
     isDatabase: false,
     hasDeployments: true,
+    manualBackupRoute: "manualBackupCompose",
+    scheduleType: "compose",
     routes: {
       deploy: "deploy",
       redeploy: "redeploy",
@@ -104,6 +125,7 @@ export const SERVICE_KINDS: Record<ServiceKind, ServiceKindConfig> = {
     color: Color.Blue,
     isDatabase: true,
     hasDeployments: false,
+    manualBackupRoute: "manualBackupPostgres",
     routes: DATABASE_ROUTES,
   },
   mysql: {
@@ -118,6 +140,7 @@ export const SERVICE_KINDS: Record<ServiceKind, ServiceKindConfig> = {
     color: Color.Orange,
     isDatabase: true,
     hasDeployments: false,
+    manualBackupRoute: "manualBackupMySql",
     routes: DATABASE_ROUTES,
   },
   mariadb: {
@@ -132,6 +155,7 @@ export const SERVICE_KINDS: Record<ServiceKind, ServiceKindConfig> = {
     color: Color.Magenta,
     isDatabase: true,
     hasDeployments: false,
+    manualBackupRoute: "manualBackupMariadb",
     routes: DATABASE_ROUTES,
   },
   mongo: {
@@ -146,6 +170,7 @@ export const SERVICE_KINDS: Record<ServiceKind, ServiceKindConfig> = {
     color: Color.Green,
     isDatabase: true,
     hasDeployments: false,
+    manualBackupRoute: "manualBackupMongo",
     routes: DATABASE_ROUTES,
   },
   redis: {
@@ -174,6 +199,7 @@ export const SERVICE_KINDS: Record<ServiceKind, ServiceKindConfig> = {
     color: Color.Yellow,
     isDatabase: true,
     hasDeployments: false,
+    manualBackupRoute: "manualBackupLibsql",
     routes: DATABASE_ROUTES,
   },
 };

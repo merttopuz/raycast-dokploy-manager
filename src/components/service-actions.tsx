@@ -1,7 +1,7 @@
 import { Action, ActionPanel, Alert, confirmAlert, Icon, Keyboard, showToast, Toast } from "@raycast/api";
 import { ReactNode } from "react";
 import { DokployClient } from "../api/client";
-import { runServiceAction } from "../api/dokploy-api";
+import { runServiceAction, supportsBackups, supportsDomains, supportsSchedules } from "../api/dokploy-api";
 import { toErrorMessage } from "../api/errors";
 import {
   ACTION_LABELS,
@@ -18,8 +18,11 @@ import { serviceUrl } from "../lib/urls";
 import { ServiceRef } from "../types/dokploy";
 import { DatabaseActions } from "./database-actions";
 import { DeploymentList } from "./deployment-list";
+import { ServiceBackups } from "./service-backups";
+import { ServiceDomains } from "./service-domains";
 import { ServiceEnv } from "./service-env";
 import { ServiceLogs } from "./service-logs";
+import { ServiceSchedules } from "./service-schedules";
 
 interface ServiceActionsProps {
   client: DokployClient;
@@ -147,6 +150,38 @@ export function ServiceActions({
             shortcut={{ modifiers: ["cmd", "shift"], key: "l" }}
             onPush={onVisit}
             target={<DeploymentList client={client} service={service} />}
+          />
+        )}
+        {/* Databases are reached on a port, not a hostname - they have no domain routes at all. */}
+        {supportsDomains(service.kind) && (
+          <Action.Push
+            title="Manage Domains"
+            icon={Icon.Globe}
+            shortcut={{ modifiers: ["cmd", "shift"], key: "u" }}
+            onPush={onVisit}
+            target={<ServiceDomains client={client} service={service} />}
+          />
+        )}
+        {/* Redis has no manual backup route, and an application has no database to dump. */}
+        {supportsBackups(service.kind) && (
+          <Action.Push
+            title="Backups"
+            icon={Icon.SaveDocument}
+            shortcut={{ modifiers: ["cmd", "shift"], key: "b" }}
+            onPush={onVisit}
+            target={<ServiceBackups client={client} service={service} />}
+          />
+        )}
+        {/* `scheduleType` has no database member, so only these two can carry one. */}
+        {supportsSchedules(service.kind) && (
+          <Action.Push
+            title="Schedules"
+            icon={Icon.Clock}
+            // Not ⌘⇧S: that is `Keyboard.Shortcut.Common.Duplicate`, and the lint rule rewrites the
+            // literal to that name on sight - leaving a "Schedules" action that reads as Duplicate.
+            shortcut={{ modifiers: ["cmd", "shift"], key: "t" }}
+            onPush={onVisit}
+            target={<ServiceSchedules client={client} service={service} />}
           />
         )}
         <Action.OpenInBrowser

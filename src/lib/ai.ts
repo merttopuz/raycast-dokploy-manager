@@ -61,21 +61,21 @@ function describeCandidate(service: ServiceRef): string {
 }
 
 /**
- * Finds the one service the user meant.
+ * Narrows a list of services to the ones a query could mean.
  *
  * Matching widens in steps - id, then exact name, then prefix, then substring - and stops at the
  * first step that produces any hit, so a service literally called "api" always wins over
- * "api-worker". An ambiguous result is an error listing the candidates rather than a guess,
- * because guessing here means deploying the wrong thing.
+ * "api-worker". More than one survivor is left as more than one: this decides *what matches*, and
+ * never which of several the user meant, because guessing there means deploying the wrong thing.
+ *
+ * Kept free of any wording, and separate from `resolveService`, because the callers speak to
+ * different audiences: a tool's failure is read by a model that can call again, a command's is read
+ * by a person watching a toast. Only the phrasing differs, and it must not be the matching that
+ * drifts between them.
  */
-export async function resolveService(
-  client: DokployClient,
-  query: string,
-  options: ResolveOptions = {},
-): Promise<ServiceRef> {
-  const all = await loadServices(client);
-
-  let pool = all;
+/** The services a query is allowed to match at all, before the query itself is considered. */
+export function filterServices(services: ServiceRef[], options: ResolveOptions = {}): ServiceRef[] {
+  let pool = services;
   if (options.kind) {
     pool = pool.filter((service) => service.kind === options.kind);
   }
@@ -83,11 +83,17 @@ export async function resolveService(
     const project = options.project.trim().toLowerCase();
     pool = pool.filter((service) => service.projectName.toLowerCase().includes(project));
   }
+  return pool;
+}
 
-  const needle = query.trim().toLowerCase();
+export function matchServices(services: ServiceRef[], query: string, options: ResolveOptions = {}): ServiceRef[] {
+  const pool = filterServices(services, options);
 
-  const byId = pool.find((service) => service.id === query.trim());
-  if (byId) return byId;
+  const trimmed = query.trim();
+  const needle = trimmed.toLowerCase();
+
+  const byId = pool.find((service) => service.id === trimmed);
+  if (byId) return [byId];
 
   const tiers = [
     pool.filter((service) => service.name.toLowerCase() === needle),
@@ -95,7 +101,22 @@ export async function resolveService(
     pool.filter((service) => service.name.toLowerCase().includes(needle)),
   ];
 
-  const matches = tiers.find((tier) => tier.length > 0) ?? [];
+  return tiers.find((tier) => tier.length > 0) ?? [];
+}
+
+/**
+ * Finds the one service the user meant, for a tool.
+ *
+ * An ambiguous result is an error listing the candidates rather than a guess. The messages are
+ * written *to the model*, which is why they say what to do next rather than merely what went wrong.
+ */
+export async function resolveService(
+  client: DokployClient,
+  query: string,
+  options: ResolveOptions = {},
+): Promise<ServiceRef> {
+  const all = await loadServices(client);
+  const matches = matchServices(all, query, options);
 
   if (matches.length === 1) return matches[0];
 
@@ -106,6 +127,7 @@ export async function resolveService(
     );
   }
 
+  const pool = filterServices(all, options);
   const available = pool.length > 0 ? pool.map(describeCandidate).join("; ") : "none";
   throw new Error(`No service matching “${query}”. Available services: ${available}.`);
 }

@@ -1,17 +1,26 @@
+import { CleanupTask, cleanupTaskConfig } from "../lib/cleanup-tasks";
 import { ServiceAction, serviceKindConfig, SERVICE_KIND_LIST } from "../lib/service-kinds";
 import {
   Application,
+  Backup,
   CentralizedDeployment,
+  CertificateType,
   Compose,
+  ContainerInfo,
   Database,
   DatabaseKind,
   Deployment,
+  DockerDiskUsageRow,
   Domain,
+  DomainValidation,
   Environment,
+  MetricsToken,
   NestedService,
   Organization,
   Project,
+  Schedule,
   Server,
+  ServerMetricsPoint,
   ServiceKind,
   ServiceRef,
   ServiceStatus,
@@ -52,12 +61,22 @@ export function getProject(client: DokployClient, projectId: string): Promise<Pr
   return client.get<Project>("project.one", { projectId });
 }
 
-export function createProject(client: DokployClient, input: { name: string; description?: string }): Promise<Project> {
-  return client.post<Project>("project.create", input);
+/**
+ * Creates a project, and with it the default environment every service has to live in.
+ *
+ * The response is `{ project, environment }` and not a bare project - Dokploy makes the two
+ * together, because a project with no environment could not hold anything.
+ */
+export function createProject(
+  client: DokployClient,
+  input: { name: string; description?: string },
+): Promise<{ project: Project; environment: Environment }> {
+  return client.post<{ project: Project; environment: Environment }>("project.create", input);
 }
 
-export function removeProject(client: DokployClient, projectId: string): Promise<unknown> {
-  return client.post("project.remove", { projectId });
+/** Deletes the project and everything in it. Dokploy does not ask twice; callers must. */
+export function removeProject(client: DokployClient, projectId: string): Promise<Project> {
+  return client.post<Project>("project.remove", { projectId });
 }
 
 export function listEnvironments(client: DokployClient, projectId: string): Promise<Environment[]> {
@@ -227,6 +246,24 @@ export function deployTemplate(
   return client.post("compose.deployTemplate", input);
 }
 
+/**
+ * The registry slugs this user has bookmarked - ids only, not templates.
+ *
+ * Per *user*, not per organization: they live in a `bookmarkedTemplates` column on the user row,
+ * so they follow whoever the account's API key belongs to. Nothing validates that a slug still
+ * exists in the registry, which is why callers match these against the catalogue rather than
+ * rendering them.
+ */
+export async function listBookmarkedTemplates(client: DokployClient): Promise<string[]> {
+  const ids = await client.get<string[]>("user.getBookmarkedTemplates");
+  return Array.isArray(ids) ? ids : [];
+}
+
+/** Adds or removes a bookmark, and answers with which of the two it just did. */
+export function toggleTemplateBookmark(client: DokployClient, templateId: string): Promise<{ isBookmarked: boolean }> {
+  return client.post<{ isBookmarked: boolean }>("user.toggleTemplateBookmark", { templateId });
+}
+
 /* ------------------------------------------------------------------ databases */
 
 /**
@@ -264,47 +301,134 @@ export async function resolveExternalHost(
 /* ------------------------------------------------------------------ environment variables */
 
 /**
- * A service's environment variables, as the single newline-separated `KEY=value` string Dokploy
- * stores - comments and blank lines included, since they round-trip through the save route.
+ * Everything `application.saveEnvironment` writes in one go.
  *
- * `null` means the service has never had any set, which Dokploy reports differently from an empty
- * string; both are rendered the same way, but neither is invented on the way back out.
+ * Grouped rather than passed separately because the route takes them together and there is no way
+ * to write one without the others - see `saveServiceEnv`. `null` and `""` are kept apart all the
+ * way through: Dokploy distinguishes "never set" from "set to nothing", and so does this.
  */
-export async function readServiceEnv(client: DokployClient, service: ServiceRef): Promise<string | null> {
-  const config = serviceKindConfig(service.kind);
-  const detail = await client.get<{ env?: string | null }>(`${config.namespace}.one`, {
-    [config.idField]: service.id,
-  });
-  return detail.env ?? null;
+export interface ServiceEnvironment {
+  env: string | null;
+  /** Applications only. `--build-arg` values, in the same `KEY=value` format as `env`. */
+  buildArgs: string | null;
+  /** Applications only. BuildKit secrets - mounted during the build, never baked into the image. */
+  buildSecrets: string | null;
+  /** Whether Dokploy materialises `env` into a `.env` file next to the source. */
+  createEnvFile: boolean;
+  /** False for the seven kinds that have no build of their own to configure. */
+  supportsBuildFields: boolean;
 }
 
 /**
- * Writes a service's environment variables back.
+ * A service's environment variables, as the single newline-separated `KEY=value` string Dokploy
+ * stores - comments and blank lines included, since they round-trip through the save route.
+ *
+ * Applications carry two more of these strings, and they are read here rather than on demand
+ * because the save route cannot write one without all three anyway.
+ */
+export async function readServiceEnv(client: DokployClient, service: ServiceRef): Promise<ServiceEnvironment> {
+  const config = serviceKindConfig(service.kind);
+  const detail = await client.get<Application>(`${config.namespace}.one`, {
+    [config.idField]: service.id,
+  });
+
+  const isApplication = service.kind === "application";
+
+  return {
+    env: detail.env ?? null,
+    buildArgs: isApplication ? (detail.buildArgs ?? null) : null,
+    buildSecrets: isApplication ? (detail.buildSecrets ?? null) : null,
+    createEnvFile: isApplication ? (detail.createEnvFile ?? false) : false,
+    supportsBuildFields: isApplication,
+  };
+}
+
+/**
+ * Writes a service's environment back.
  *
  * `application.saveEnvironment` is the trap here. Every other kind takes `{ <kind>Id, env }`, but
  * the application route *requires* `buildArgs`, `buildSecrets` and `createEnvFile` on every call:
- * sending only `env` fails validation, and sending them as empty defaults silently wipes the user's
- * build secrets. So the current values are read back and echoed in untouched.
+ * sending only `env` fails validation, and sending them as empty defaults silently wipes the
+ * user's build secrets. Which is why this takes the whole `ServiceEnvironment` rather than a
+ * string - a caller that only wants to change `env` still has to say what the rest are, and the
+ * only safe answer is the values it was shown.
  */
-export async function saveServiceEnv(client: DokployClient, service: ServiceRef, env: string): Promise<void> {
+export async function saveServiceEnv(
+  client: DokployClient,
+  service: ServiceRef,
+  environment: ServiceEnvironment,
+): Promise<void> {
   const config = serviceKindConfig(service.kind);
 
   if (service.kind === "application") {
-    const current = await client.get<Application>("application.one", { applicationId: service.id });
     await client.post("application.saveEnvironment", {
       applicationId: service.id,
-      env,
-      buildArgs: current.buildArgs ?? null,
-      buildSecrets: current.buildSecrets ?? null,
-      createEnvFile: current.createEnvFile ?? false,
+      env: environment.env,
+      buildArgs: environment.buildArgs,
+      buildSecrets: environment.buildSecrets,
+      createEnvFile: environment.createEnvFile,
     });
     return;
   }
 
   await client.post(`${config.namespace}.saveEnvironment`, {
     [config.idField]: service.id,
-    env,
+    env: environment.env,
   });
+}
+
+/* ------------------------------------------------------------------ containers */
+
+/** What Docker reports when Dokploy could not parse a field out of `docker ps`. */
+const CONTAINER_STATE_UNKNOWN = "No state";
+
+export function isContainerRunning(container: ContainerInfo): boolean {
+  return container.state === "running";
+}
+
+/** Containers whose name Dokploy couldn't read can't be asked for logs either. */
+export function isUsableContainer(container: ContainerInfo): boolean {
+  return container.containerId.length > 0 && !container.containerId.startsWith("No container");
+}
+
+/**
+ * The containers a compose stack is actually running.
+ *
+ * This is the route to use rather than `compose.loadServices`, which is a tempting near-miss:
+ * `loadServices` parses the compose *file* and returns its service keys, but `compose.readLogs`
+ * runs `docker container logs <containerId>` against the raw value it is given and never resolves
+ * a name to an id. A service key from `loadServices` is not a container, so it fails.
+ *
+ * `appType` matters - `docker-compose` filters on the compose project label, anything else falls
+ * back to matching the container name - and `serverId` more so: omit it for a stack pinned to a
+ * remote server and Docker is queried on the wrong machine, which reports no containers rather
+ * than an error.
+ *
+ * Which is the caveat worth knowing: this route swallows *every* failure and answers `[]`. A stack
+ * that is stopped, a server that is unreachable and a name that doesn't exist are indistinguishable
+ * here, so an empty list is only ever "nothing to show", never "the stack is down".
+ *
+ * The detail round-trip is not avoidable: `appType` and `serverId` are both on the compose row and
+ * neither survives into the project tree.
+ */
+export async function listComposeContainers(client: DokployClient, service: ServiceRef): Promise<ContainerInfo[]> {
+  if (service.kind !== "compose") return [];
+
+  const compose = (await getService(client, "compose", service.id)) as Compose;
+  if (!compose.appName) return [];
+
+  const containers = await client.get<ContainerInfo[]>("docker.getContainersByAppNameMatch", {
+    appName: compose.appName,
+    appType: compose.composeType ?? "docker-compose",
+    serverId: compose.serverId ?? undefined,
+  });
+
+  return (containers ?? []).filter(isUsableContainer);
+}
+
+/** A container's state, for display - Docker's own string, tidied only when it's a parse failure. */
+export function containerStateLabel(container: ContainerInfo): string {
+  return container.state === CONTAINER_STATE_UNKNOWN ? "unknown" : container.state;
 }
 
 /* ------------------------------------------------------------------ logs */
@@ -336,6 +460,149 @@ export async function readServiceLogs(
   if (Array.isArray(result)) return result.join("\n");
   return result ? JSON.stringify(result, null, 2) : "";
 }
+
+/* ------------------------------------------------------------------ backups & schedules */
+
+export function supportsBackups(kind: ServiceKind): boolean {
+  return serviceKindConfig(kind).manualBackupRoute !== undefined;
+}
+
+export function supportsSchedules(kind: ServiceKind): boolean {
+  return serviceKindConfig(kind).scheduleType !== undefined;
+}
+
+/**
+ * The backups configured for a service.
+ *
+ * Read off the service's own detail route, because there is no route that lists them: Dokploy has
+ * a `findBackupsByDbId` internally but never exposes it, and `<kind>.one` hydrates `backups` with
+ * their destinations and run history anyway. One request, everything needed.
+ *
+ * The detail row carries the database's password, so this must not be called from a cached hook -
+ * only the backups are returned, but the response it is read out of is a secret.
+ */
+export async function listServiceBackups(client: DokployClient, service: ServiceRef): Promise<Backup[]> {
+  const config = serviceKindConfig(service.kind);
+  if (!config.manualBackupRoute) return [];
+
+  const detail = await client.get<{ backups?: Backup[] }>(`${config.namespace}.one`, {
+    [config.idField]: service.id,
+  });
+
+  return detail.backups ?? [];
+}
+
+/**
+ * Runs a configured backup now, rather than when its cron next fires.
+ *
+ * Takes the backup and not the service: Dokploy has no ad-hoc backup route, so there is nothing to
+ * run until one has been configured with a destination to write to.
+ */
+export async function runManualBackup(client: DokployClient, service: ServiceRef, backupId: string): Promise<void> {
+  const config = serviceKindConfig(service.kind);
+  if (!config.manualBackupRoute) {
+    throw new Error(`${config.label} services cannot be backed up this way.`);
+  }
+  await client.post(`backup.${config.manualBackupRoute}`, { backupId });
+}
+
+/** The schedules attached to one application or compose stack. */
+export async function listSchedules(client: DokployClient, service: ServiceRef): Promise<Schedule[]> {
+  const config = serviceKindConfig(service.kind);
+  if (!config.scheduleType) return [];
+
+  const schedules = await client.get<Schedule[]>("schedule.list", {
+    id: service.id,
+    scheduleType: config.scheduleType,
+  });
+
+  return Array.isArray(schedules) ? schedules : [];
+}
+
+/**
+ * Runs a schedule's command now.
+ *
+ * Dokploy records the run as a deployment and streams the command's output into its log, which is
+ * why the result is not here: this returns as soon as the run is started, and what it printed is
+ * read back from the run history.
+ */
+export async function runSchedule(client: DokployClient, scheduleId: string): Promise<void> {
+  await client.post("schedule.runManually", { scheduleId });
+}
+
+/* ------------------------------------------------------------------ disk & metrics */
+
+/**
+ * What Docker is using on the Dokploy host, one row per `docker system df` type.
+ *
+ * Host only - the route takes no `serverId`, so a remote server's disk is out of reach. It is also
+ * admin-only, and answers `[]` on Dokploy Cloud. Callers treat a failure as "no disk information"
+ * rather than an error worth showing, because a scoped user isn't doing anything wrong.
+ */
+export async function getDockerDiskUsage(client: DokployClient): Promise<DockerDiskUsageRow[]> {
+  const rows = await client.get<DockerDiskUsageRow[]>("settings.getDockerDiskUsage");
+  return Array.isArray(rows) ? rows : [];
+}
+
+/**
+ * Runs one of Docker's prune commands.
+ *
+ * `serverId` is optional and means the Dokploy host when omitted - unlike `getDockerDiskUsage`,
+ * these routes *can* reach a remote server.
+ */
+export async function runCleanupTask(client: DokployClient, task: CleanupTask, serverId?: string): Promise<void> {
+  await client.post(cleanupTaskConfig(task).route, serverId ? { serverId } : {});
+}
+
+/**
+ * The most recent sample from the monitoring container, or undefined when there isn't one.
+ *
+ * Two calls, because `server.getServerMetrics` is a *proxy*, not a data source: it forwards to a
+ * metrics container that Dokploy does not itself host, so the caller has to supply that
+ * container's URL and bearer token. `user.getMetricsToken` is where both come from.
+ *
+ * Monitoring is an opt-in feature and most instances don't run it, so "no metrics" is an ordinary
+ * outcome and not an error: this returns undefined when the route throws - which it does for a
+ * container that isn't running, a user without `monitoring:read`, or an empty series - rather than
+ * making every caller wrap it. The precheck below only saves an obviously doomed request; nothing
+ * in `getMetricsToken` proves the container is up, so the catch is what actually does the work.
+ *
+ * `dataPoints: "1"` is the newest sample, not the oldest: the series is cut newest-first and then
+ * re-sorted oldest-to-newest, so the freshest point is always the last element.
+ */
+export interface ServerMetricsResult {
+  metrics: ServerMetricsPoint;
+  /**
+   * The CPU and memory limits configured in Dokploy's own monitoring settings, in percent.
+   * Reused rather than re-asked for, so the menu bar alerts on the same numbers the dashboard does.
+   */
+  thresholds?: { cpu: number; memory: number };
+}
+
+export async function readServerMetrics(client: DokployClient): Promise<ServerMetricsResult | undefined> {
+  try {
+    const config = await client.get<MetricsToken>("user.getMetricsToken");
+
+    const server = config.metricsConfig?.server;
+    if (!config.serverIp || !server?.token) return undefined;
+
+    const metrics = await client.get<ServerMetricsPoint[]>("server.getServerMetrics", {
+      url: `http://${config.serverIp}:${server.port ?? DEFAULT_METRICS_PORT}/metrics`,
+      token: server.token,
+      dataPoints: "1",
+    });
+
+    const latest = Array.isArray(metrics) ? metrics.at(-1) : undefined;
+    // The token dies with this scope. Only the sample and the thresholds go back to the caller,
+    // which is what lets the result be cached at all.
+    return latest ? { metrics: latest, thresholds: server.thresholds } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Dokploy's default port for the monitoring container. */
+const DEFAULT_METRICS_PORT = 4500;
 
 /* ------------------------------------------------------------------ deployments & domains */
 
@@ -433,4 +700,67 @@ export function listDomains(client: DokployClient, service: ServiceRef): Promise
     return client.get<Domain[]>("domain.byComposeId", { composeId: service.id });
   }
   return Promise.resolve([]);
+}
+
+/** Only applications and compose stacks can have a domain; the six database kinds cannot. */
+export function supportsDomains(kind: ServiceKind): boolean {
+  return kind === "application" || kind === "compose";
+}
+
+export interface NewDomain {
+  host: string;
+  path?: string;
+  port?: number;
+  https: boolean;
+  certificateType: CertificateType;
+  /** Which container of a compose stack traffic goes to. Meaningless for an application. */
+  serviceName?: string;
+}
+
+/**
+ * Points a domain at a service.
+ *
+ * Dokploy's own validation is thinner than it looks - `host` is the only field its schema insists
+ * on, and the cross-field rules its dashboard applies (https needs a certificate type, and so on)
+ * live in the browser and never run for an API call. So the form is where those rules have to be
+ * kept, and this sends a complete, coherent row rather than the minimum that would be accepted.
+ *
+ * `domainType` is derived from the service and always sent - see `DomainType` for why that is not
+ * merely tidy.
+ */
+export async function createDomain(client: DokployClient, service: ServiceRef, domain: NewDomain): Promise<Domain> {
+  const isCompose = service.kind === "compose";
+
+  return client.post<Domain>("domain.create", {
+    ...domain,
+    domainType: isCompose ? "compose" : "application",
+    ...(isCompose ? { composeId: service.id, serviceName: domain.serviceName } : { applicationId: service.id }),
+  });
+}
+
+export function deleteDomain(client: DokployClient, domainId: string): Promise<Domain> {
+  return client.post<Domain>("domain.delete", { domainId });
+}
+
+/**
+ * Asks Dokploy for a working hostname, so the user doesn't need one of their own to get started.
+ *
+ * Two things the name doesn't tell you: it answers with a bare JSON string rather than an object,
+ * and despite being called `generateTraefikMeDomain` internally it produces an **sslip.io** host -
+ * `<app>-<hash>-<server-ip>.sslip.io`, which resolves to the server without any DNS being set up.
+ */
+export function generateDomain(client: DokployClient, appName: string, serverId?: string | null): Promise<string> {
+  return client.post<string>("domain.generateDomain", { appName, ...(serverId ? { serverId } : {}) });
+}
+
+/**
+ * Checks that a domain's DNS actually points here.
+ *
+ * DNS only: it does not know whether the host is already used by another service, so a "valid"
+ * answer is not a promise that the create will succeed. Without `serverIp` it resolves the name
+ * and calls anything that resolves valid, so passing the server's address is what makes it a real
+ * check rather than a spell-check.
+ */
+export function validateDomain(client: DokployClient, domain: string, serverIp?: string): Promise<DomainValidation> {
+  return client.post<DomainValidation>("domain.validateDomain", { domain, ...(serverIp ? { serverIp } : {}) });
 }
