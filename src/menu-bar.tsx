@@ -21,7 +21,7 @@ import { useAccounts } from "./hooks/use-accounts";
 import { useAllDeployments } from "./hooks/use-deployments";
 import { AccountProjects, useAllProjects } from "./hooks/use-projects";
 import { hasServerInfo, useAllServerHealth } from "./hooks/use-server-health";
-import { deploymentHeadline, firstLine, relativeTime } from "./lib/format";
+import { firstLine } from "./lib/format";
 import { formatPercent } from "./lib/health";
 import {
   ACTION_LABELS,
@@ -32,7 +32,7 @@ import {
   serviceKindConfig,
   supportsAction,
 } from "./lib/service-kinds";
-import { deploymentIcon, deploymentPresentation, statusIcon } from "./lib/status";
+import { deploymentIcon, statusIcon } from "./lib/status";
 import { deploymentsUrl, projectsUrl, serviceUrl } from "./lib/urls";
 import { ServiceRef } from "./types/dokploy";
 import { DeploymentsLaunchContext } from "./types/launch";
@@ -269,18 +269,12 @@ export default function MenuBar() {
             <MenuBarExtra.Item
               key={`${item.accountId}:${item.deploymentId}`}
               icon={deploymentIcon(item.status)}
-              // Identity first - which server, which project, which service, and how it went.
+              // Which server, which project, which service - the icon's color already says how it
+              // went, so the status and commit detail are left off and only the identity remains.
               // The account is only worth the space when more than one is being watched.
-              title={[
-                showAccountNames ? item.accountLabel : undefined,
-                item.service.projectName,
-                item.service.name,
-                deploymentPresentation(item.status).label,
-              ]
+              title={[showAccountNames ? item.accountLabel : undefined, item.service.projectName, item.service.name]
                 .filter(Boolean)
                 .join(" · ")}
-              // The commit message is the *whole* commit, body included. One line, and no more.
-              subtitle={[deploymentHeadline(item.title), relativeTime(item.createdAt)].filter(Boolean).join(" · ")}
               tooltip={item.errorMessage?.trim() || firstLine(item.title) || undefined}
               // Opens that service's build history inside Raycast, not in the browser.
               onAction={() => openDeployments(item.accountId, item.service)}
