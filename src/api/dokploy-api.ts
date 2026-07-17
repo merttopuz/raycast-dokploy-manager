@@ -3,6 +3,8 @@ import {
   Application,
   CentralizedDeployment,
   Compose,
+  Database,
+  DatabaseKind,
   Deployment,
   Domain,
   Environment,
@@ -14,6 +16,7 @@ import {
   ServiceRef,
   ServiceStatus,
   SessionUser,
+  Template,
 } from "../types/dokploy";
 import { DokployClient } from "./client";
 
@@ -97,7 +100,7 @@ export function flattenServices(projects: Project[]): ServiceRef[] {
             id,
             // Left empty rather than defaulted to the kind label, because an empty name is a fact
             // (`project.all` didn't send one) that `enrichServices` can then go and fix. Defaulting
-            // here is what made every database render as a nameless "PostgreSQL — Unknown".
+            // here is what made every database render as a nameless "PostgreSQL - Unknown".
             name: row.name ?? "",
             status: readServiceStatus(row, config.kind),
             appName: row.appName,
@@ -123,7 +126,7 @@ export function flattenServices(projects: Project[]): ServiceRef[] {
  * otherwise render as a nameless row with an unknown status, so each one is topped up from its
  * own detail route.
  *
- * Only the incomplete services cost a request, so this is free when Dokploy sends everything —
+ * Only the incomplete services cost a request, so this is free when Dokploy sends everything -
  * and it fixes itself if a future version starts doing so.
  */
 export async function enrichServices(client: DokployClient, services: ServiceRef[]): Promise<ServiceRef[]> {
@@ -195,6 +198,113 @@ export async function runServiceAction(
 async function resolveAppName(client: DokployClient, service: ServiceRef): Promise<string | undefined> {
   const detail = (await getService(client, service.kind, service.id)) as NestedService;
   return detail.appName;
+}
+
+/* ------------------------------------------------------------------ templates */
+
+/**
+ * The ready-made compose stacks available to this instance.
+ *
+ * Dokploy proxies a registry here rather than answering from its own database, so this is a
+ * network call to `templates.dokploy.com` made *by the server* - it's slow and it's ~270KB for
+ * around 500 templates, which is why the command caches it.
+ */
+export function listTemplates(client: DokployClient, baseUrl?: string): Promise<Template[]> {
+  return client.get<Template[]>("compose.templates", { baseUrl });
+}
+
+/**
+ * Installs a template into an environment, creating the compose service and deploying it.
+ *
+ * `id` is the template's registry slug (`uptime-kuma`), not an id from this instance: the server
+ * resolves it back to `<baseUrl>/blueprints/<id>/` to fetch the compose file. `serverId` picks
+ * which machine runs it, and omitting it means the Dokploy host itself.
+ */
+export function deployTemplate(
+  client: DokployClient,
+  input: { environmentId: string; id: string; serverId?: string },
+): Promise<unknown> {
+  return client.post("compose.deployTemplate", input);
+}
+
+/* ------------------------------------------------------------------ databases */
+
+/**
+ * The typed sibling of `getService` for the six database kinds.
+ *
+ * What comes back carries the database password in the clear, so - like every other route that
+ * returns a secret - callers must fetch it through `usePromise`. `useCachedPromise` would write it
+ * to Raycast's unencrypted on-disk cache.
+ */
+export function getDatabase(client: DokployClient, kind: DatabaseKind, id: string): Promise<Database> {
+  const config = serviceKindConfig(kind);
+  return client.get<Database>(`${config.namespace}.one`, { [config.idField]: id });
+}
+
+/**
+ * The address a service is reachable at from outside the server.
+ *
+ * Mirrors the dashboard's own rule (`server?.ipAddress || settings.getIp`): a service pinned to a
+ * remote server answers on that server's IP, everything else on the Dokploy host's configured one.
+ * Undefined when no IP is set at all, which Dokploy also treats as "no external URL can be formed"
+ * rather than guessing.
+ */
+export async function resolveExternalHost(
+  client: DokployClient,
+  serverId?: string | null,
+): Promise<string | undefined> {
+  if (serverId) {
+    const server = await client.get<Server>("server.one", { serverId });
+    return server.ipAddress || undefined;
+  }
+  const ip = await client.get<string>("settings.getIp");
+  return typeof ip === "string" && ip.length > 0 ? ip : undefined;
+}
+
+/* ------------------------------------------------------------------ environment variables */
+
+/**
+ * A service's environment variables, as the single newline-separated `KEY=value` string Dokploy
+ * stores - comments and blank lines included, since they round-trip through the save route.
+ *
+ * `null` means the service has never had any set, which Dokploy reports differently from an empty
+ * string; both are rendered the same way, but neither is invented on the way back out.
+ */
+export async function readServiceEnv(client: DokployClient, service: ServiceRef): Promise<string | null> {
+  const config = serviceKindConfig(service.kind);
+  const detail = await client.get<{ env?: string | null }>(`${config.namespace}.one`, {
+    [config.idField]: service.id,
+  });
+  return detail.env ?? null;
+}
+
+/**
+ * Writes a service's environment variables back.
+ *
+ * `application.saveEnvironment` is the trap here. Every other kind takes `{ <kind>Id, env }`, but
+ * the application route *requires* `buildArgs`, `buildSecrets` and `createEnvFile` on every call:
+ * sending only `env` fails validation, and sending them as empty defaults silently wipes the user's
+ * build secrets. So the current values are read back and echoed in untouched.
+ */
+export async function saveServiceEnv(client: DokployClient, service: ServiceRef, env: string): Promise<void> {
+  const config = serviceKindConfig(service.kind);
+
+  if (service.kind === "application") {
+    const current = await client.get<Application>("application.one", { applicationId: service.id });
+    await client.post("application.saveEnvironment", {
+      applicationId: service.id,
+      env,
+      buildArgs: current.buildArgs ?? null,
+      buildSecrets: current.buildSecrets ?? null,
+      createEnvFile: current.createEnvFile ?? false,
+    });
+    return;
+  }
+
+  await client.post(`${config.namespace}.saveEnvironment`, {
+    [config.idField]: service.id,
+    env,
+  });
 }
 
 /* ------------------------------------------------------------------ logs */

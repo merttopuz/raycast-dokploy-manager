@@ -3,6 +3,7 @@ import { AccountDropdown } from "./components/account-dropdown";
 import { NoAccounts } from "./components/no-accounts";
 import { ServiceListItem } from "./components/service-list-item";
 import { useAccounts } from "./hooks/use-accounts";
+import { useServiceFrecency } from "./hooks/use-frecency";
 import { useServices } from "./hooks/use-projects";
 import { SERVICE_KIND_LIST } from "./lib/service-kinds";
 
@@ -17,6 +18,7 @@ export default function SearchServices() {
     reloadAccounts,
   } = useAccounts();
   const { services, isLoading: servicesLoading, revalidate } = useServices(client);
+  const { data: sortedServices, visitItem, resetRanking } = useServiceFrecency(services, client);
 
   if (!accountsLoading && !hasAccounts) {
     return (
@@ -28,9 +30,12 @@ export default function SearchServices() {
 
   // Grouped by kind, so typing "post" surfaces the Postgres databases together rather than
   // interleaved with everything else. Kind names are in each item's keywords, so they're searchable.
+  //
+  // Filtering preserves order, so each section comes out in frecency order: the service you deploy
+  // every day sits at the top of its section, rather than wherever Dokploy happened to return it.
   const grouped = SERVICE_KIND_LIST.map((config) => ({
     config,
-    services: services.filter((service) => service.kind === config.kind),
+    services: sortedServices.filter((service) => service.kind === config.kind),
   })).filter((group) => group.services.length > 0);
 
   return (
@@ -56,6 +61,8 @@ export default function SearchServices() {
                 client={client}
                 service={service}
                 onDidChange={revalidate}
+                onVisit={() => visitItem(service)}
+                onResetRanking={() => resetRanking(service)}
                 showProject
               />
             ) : null,

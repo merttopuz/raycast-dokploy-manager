@@ -4,9 +4,9 @@ import { AccountDropdown } from "./components/account-dropdown";
 import { NoAccounts } from "./components/no-accounts";
 import { ServiceListItem } from "./components/service-list-item";
 import { useAccounts } from "./hooks/use-accounts";
+import { useProjectFrecency, useServiceFrecency } from "./hooks/use-frecency";
 import { ProjectNode, useProjects } from "./hooks/use-projects";
 import { projectUrl } from "./lib/urls";
-import { ServiceRef } from "./types/dokploy";
 
 export default function BrowseProjects() {
   const {
@@ -19,6 +19,7 @@ export default function BrowseProjects() {
     reloadAccounts,
   } = useAccounts();
   const { data: projects, isLoading: projectsLoading, revalidate } = useProjects(client);
+  const { data: sortedProjects, visitItem, resetRanking } = useProjectFrecency(projects, client);
 
   if (!accountsLoading && !hasAccounts) {
     return (
@@ -38,7 +39,7 @@ export default function BrowseProjects() {
     >
       <List.EmptyView icon={Icon.Folder} title="No Projects" description="This Dokploy account has no projects yet." />
 
-      {projects.map((project) => (
+      {sortedProjects.map((project) => (
         <List.Item
           key={project.projectId}
           icon={{ source: Icon.Folder, tintColor: Color.Blue }}
@@ -55,6 +56,7 @@ export default function BrowseProjects() {
               <Action.Push
                 title="Open Project"
                 icon={Icon.ArrowRight}
+                onPush={() => visitItem(project)}
                 target={
                   client ? <ProjectServices client={client} project={project} onDidChange={revalidate} /> : <List />
                 }
@@ -63,6 +65,7 @@ export default function BrowseProjects() {
                 <Action.OpenInBrowser
                   title="Open in Dokploy"
                   url={projectUrl(client.webUrl, project.projectId)}
+                  onOpen={() => visitItem(project)}
                   shortcut={Keyboard.Shortcut.Common.Open}
                 />
               )}
@@ -72,6 +75,7 @@ export default function BrowseProjects() {
                 shortcut={Keyboard.Shortcut.Common.Refresh}
                 onAction={revalidate}
               />
+              <Action title="Reset Ranking" icon={Icon.ArrowCounterClockwise} onAction={() => resetRanking(project)} />
             </ActionPanel>
           }
         />
@@ -88,7 +92,10 @@ interface ProjectServicesProps {
 
 /** One section per environment, because a service's identity is (project, environment, kind). */
 function ProjectServices({ client, project, onDidChange }: ProjectServicesProps) {
-  const hasAnyService = project.environments.some((environment) => environment.services.length > 0);
+  const allServices = project.environments.flatMap((environment) => environment.services);
+  const { data: sortedServices, visitItem, resetRanking } = useServiceFrecency(allServices, client);
+
+  const hasAnyService = allServices.length > 0;
 
   return (
     <List navigationTitle={project.name} searchBarPlaceholder={`Search services in ${project.name}…`}>
@@ -111,14 +118,19 @@ function ProjectServices({ client, project, onDidChange }: ProjectServicesProps)
           title={environment.name}
           subtitle={environment.isDefault ? "default" : undefined}
         >
-          {environment.services.map((service: ServiceRef) => (
-            <ServiceListItem
-              key={`${service.kind}:${service.id}`}
-              client={client}
-              service={service}
-              onDidChange={onDidChange}
-            />
-          ))}
+          {/* Filtered out of the frecency-sorted list, so each environment keeps that order. */}
+          {sortedServices
+            .filter((service) => service.environmentId === environment.environmentId)
+            .map((service) => (
+              <ServiceListItem
+                key={`${service.kind}:${service.id}`}
+                client={client}
+                service={service}
+                onDidChange={onDidChange}
+                onVisit={() => visitItem(service)}
+                onResetRanking={() => resetRanking(service)}
+              />
+            ))}
         </List.Section>
       ))}
     </List>

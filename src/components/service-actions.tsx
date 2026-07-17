@@ -9,13 +9,16 @@ import {
   ACTION_PROGRESS,
   DESTRUCTIVE_ACTIONS,
   hasDeployments,
+  isDatabaseKind,
   ServiceAction,
   serviceKindConfig,
   supportsAction,
 } from "../lib/service-kinds";
 import { serviceUrl } from "../lib/urls";
 import { ServiceRef } from "../types/dokploy";
+import { DatabaseActions } from "./database-actions";
 import { DeploymentList } from "./deployment-list";
+import { ServiceEnv } from "./service-env";
 import { ServiceLogs } from "./service-logs";
 
 interface ServiceActionsProps {
@@ -28,6 +31,12 @@ interface ServiceActionsProps {
    * Taking it as a prop keeps this file from importing the detail view, which would be a cycle.
    */
   primaryAction?: ReactNode;
+  /**
+   * Records that the user did something with this service, which is what moves it up a
+   * frecency-sorted list. Omitted by the detail view, whose caller has already counted the visit.
+   */
+  onVisit?: () => void;
+  onResetRanking?: () => void;
 }
 
 const ACTION_ICONS: Record<ServiceAction, Icon> = {
@@ -57,10 +66,22 @@ const LIFECYCLE_ORDER: ServiceAction[] = ["deploy", "redeploy", "rebuild", "star
  * Every lifecycle action for one service. Which actions appear is driven entirely by the
  * service-kind registry, so the eight kinds share this one implementation.
  */
-export function ServiceActions({ client, service, onDidChange, primaryAction }: ServiceActionsProps) {
+export function ServiceActions({
+  client,
+  service,
+  onDidChange,
+  primaryAction,
+  onVisit,
+  onResetRanking,
+}: ServiceActionsProps) {
   const config = serviceKindConfig(service.kind);
 
   async function perform(action: ServiceAction) {
+    // Counted before the confirmation prompt and before the request: deciding to deploy a service
+    // is the signal we care about, and a deploy that fails is still a service you were working on.
+    // Deleting is the exception - ranking something you just removed would keep a ghost at the top.
+    if (action !== "remove") onVisit?.();
+
     if (DESTRUCTIVE_ACTIONS.includes(action)) {
       const confirmed = await confirmAlert({
         title: `${ACTION_LABELS[action]} ${service.name}?`,
@@ -108,7 +129,15 @@ export function ServiceActions({ client, service, onDidChange, primaryAction }: 
           title="View Logs"
           icon={Icon.Terminal}
           shortcut={{ modifiers: ["cmd"], key: "l" }}
+          onPush={onVisit}
           target={<ServiceLogs client={client} service={service} />}
+        />
+        <Action.Push
+          title="Environment Variables"
+          icon={Icon.Key}
+          shortcut={{ modifiers: ["cmd", "shift"], key: "e" }}
+          onPush={onVisit}
+          target={<ServiceEnv client={client} service={service} />}
         />
         {/* Databases have no build history, so the action would only ever show an empty list. */}
         {hasDeployments(service.kind) && (
@@ -116,15 +145,19 @@ export function ServiceActions({ client, service, onDidChange, primaryAction }: 
             title="View Deployments"
             icon={Icon.Clock}
             shortcut={{ modifiers: ["cmd", "shift"], key: "l" }}
+            onPush={onVisit}
             target={<DeploymentList client={client} service={service} />}
           />
         )}
         <Action.OpenInBrowser
           title="Open in Dokploy"
           url={serviceUrl(client.webUrl, service)}
+          onOpen={onVisit}
           shortcut={Keyboard.Shortcut.Common.Open}
         />
       </ActionPanel.Section>
+
+      {isDatabaseKind(service.kind) && <DatabaseActions client={client} service={service} kind={service.kind} />}
 
       <ActionPanel.Section title="Lifecycle">
         {LIFECYCLE_ORDER.filter((action) => supportsAction(service.kind, action)).map((action) => (
@@ -140,6 +173,7 @@ export function ServiceActions({ client, service, onDidChange, primaryAction }: 
 
       <ActionPanel.Section>
         <Action.CopyToClipboard title="Copy Service ID" content={service.id} shortcut={Keyboard.Shortcut.Common.Copy} />
+        {onResetRanking && <Action title="Reset Ranking" icon={Icon.ArrowCounterClockwise} onAction={onResetRanking} />}
         {supportsAction(service.kind, "remove") && (
           <Action
             title={`Delete ${config.label}`}

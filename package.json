@@ -33,6 +33,12 @@
       "mode": "view"
     },
     {
+      "name": "templates",
+      "title": "Deploy Template",
+      "description": "Browse Dokploy's ready-made compose templates and install one into a project.",
+      "mode": "view"
+    },
+    {
       "name": "manage-accounts",
       "title": "Manage Accounts",
       "description": "Add, edit, remove and switch between multiple Dokploy accounts.",

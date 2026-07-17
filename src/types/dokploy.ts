@@ -11,6 +11,9 @@ export type SourceType = "docker" | "git" | "github" | "gitlab" | "bitbucket" | 
  */
 export type ServiceKind = "application" | "compose" | "postgres" | "mysql" | "mariadb" | "mongo" | "redis" | "libsql";
 
+/** The six kinds that are a database, i.e. the ones a connection URI can be built for. */
+export type DatabaseKind = Exclude<ServiceKind, "application" | "compose">;
+
 /**
  * `project.all` returns *different shapes depending on the caller's role*: owners and admins get
  * full rows, while a scoped user only gets `{ id, name, status }` per service. Everything past the
@@ -80,10 +83,49 @@ export interface Application extends NestedService {
   branch?: string | null;
   dockerImage?: string | null;
   env?: string | null;
+  /**
+   * Build-time values, stored in the same `KEY=value` format as `env` but kept separate from it.
+   * They matter here only because `application.saveEnvironment` demands them back on every write -
+   * see `saveServiceEnv`.
+   */
+  buildArgs?: string | null;
+  buildSecrets?: string | null;
+  /** Whether Dokploy materialises `env` into a `.env` file. Also required on every env write. */
+  createEnvFile?: boolean;
   replicas?: number;
   autoDeploy?: boolean | null;
   environmentId?: string;
   serverId?: string | null;
+  createdAt?: string;
+}
+
+/**
+ * The connection-relevant half of a database service.
+ *
+ * The six kinds are close but not identical, and the differences are exactly the ones a connection
+ * URI cares about, so every field past the first three is optional:
+ *
+ * - `databaseName` - postgres, mysql and mariadb only. Mongo, Redis and LibSQL have no such column.
+ * - `databaseUser` - absent on Redis, which authenticates with a password alone.
+ * - `databaseRootPassword` - mysql and mariadb only. Postgres has no root password.
+ * - `externalPort` - null when the database isn't published outside the Docker network.
+ */
+export interface Database extends NestedService {
+  name: string;
+  appName: string;
+  applicationStatus: ServiceStatus;
+  dockerImage?: string | null;
+  databaseUser?: string | null;
+  databasePassword?: string | null;
+  databaseRootPassword?: string | null;
+  databaseName?: string | null;
+  externalPort?: number | null;
+  env?: string | null;
+  environmentId?: string;
+  /** Null for services on the Dokploy host itself; set for a remote server. */
+  serverId?: string | null;
+  /** Mongo only - changes the URI. */
+  replicaSets?: boolean | null;
   createdAt?: string;
 }
 
@@ -166,6 +208,34 @@ export interface Server {
   username?: string;
   serverStatus?: string;
   createdAt?: string;
+}
+
+/**
+ * One of the ready-made compose stacks Dokploy can install (n8n, Plausible, Uptime Kuma…).
+ *
+ * These come from a registry rather than the instance's own database: `compose.templates` fetches
+ * `<baseUrl>/meta.json`, defaulting to `https://templates.dokploy.com`. The seven fields below are
+ * the whole contract - Dokploy's `fetchTemplatesList` ends in a `.map()` that projects exactly
+ * these, so nothing else can appear no matter what the registry serves.
+ */
+export interface Template {
+  /** The registry's directory slug, e.g. `uptime-kuma`. This is what `deployTemplate` takes. */
+  id: string;
+  name: string;
+  description: string;
+  /** Free-form display text, not semver: about half of them are literally "latest". */
+  version: string;
+  /** A bare filename, not a URL - see `templateLogoUrl`. */
+  logo: string;
+  links: {
+    github?: string;
+    website?: string;
+    docs?: string;
+    discord?: string;
+    docker?: string;
+    dockerhub?: string;
+  };
+  tags: string[];
 }
 
 export interface Organization {

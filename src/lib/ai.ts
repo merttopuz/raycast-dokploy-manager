@@ -44,7 +44,7 @@ export async function requireClient(accountLabel?: string): Promise<DokployClien
   return new DokployClient(match);
 }
 
-/** Enriched, because `project.all` sends databases with nothing but an id — see `enrichServices`. */
+/** Enriched, because `project.all` sends databases with nothing but an id - see `enrichServices`. */
 export async function loadServices(client: DokployClient): Promise<ServiceRef[]> {
   const projects = await listProjects(client);
   return enrichServices(client, flattenServices(projects));

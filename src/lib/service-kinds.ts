@@ -1,5 +1,5 @@
 import { Color, Icon } from "@raycast/api";
-import { EnvironmentServiceKey, ServiceKind } from "../types/dokploy";
+import { DatabaseKind, EnvironmentServiceKey, ServiceKind } from "../types/dokploy";
 
 /**
  * Every lifecycle action Dokploy exposes for a service. Not every kind supports every action:
@@ -191,6 +191,11 @@ export function supportsAction(kind: ServiceKind, action: ServiceAction): boolea
 /** Applications and compose stacks have a build history; databases don't. */
 export function hasDeployments(kind: ServiceKind): boolean {
   return SERVICE_KINDS[kind].hasDeployments;
+}
+
+/** Narrows to the six kinds a connection URI can be built for. */
+export function isDatabaseKind(kind: ServiceKind): kind is DatabaseKind {
+  return SERVICE_KINDS[kind].isDatabase;
 }
 
 /** The label shown on the action, e.g. databases "Rebuild" where applications "Redeploy". */
